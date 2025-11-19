@@ -2,7 +2,7 @@ import os
 import re
 import uuid
 import mimetypes
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 
 from fastapi import HTTPException, status
 from fastapi.concurrency import run_in_threadpool
@@ -13,8 +13,8 @@ from .models import UploadResponse, UploadedFileInfo
 from .s3_client import S3Client
 
 
-# validate form keys like `1-pickup` or `1-return`
-KEY_REGEX = re.compile(r"^(?P<id>\d+)-(?P<side>pickup|return)$")
+# validate form keys like `front-pickup` or `front-return`
+KEY_REGEX = re.compile(r"^(?P<side>front|rear|left|right)-(?P<phase>pickup|return)$")
 
 
 class UploadService:
@@ -23,10 +23,22 @@ class UploadService:
         self._settings = settings
 
     async def handle_upload_form(self, form: FormData) -> UploadResponse:
-        """Process the multipart form, upload files to S3, and return metadata."""
+        """Process the multipart form, upload files to S3, and return metadata.
+
+        Expected form field names:
+            `<side>-pickup` and `<side>-return`
+
+        Where:
+            side ∈ {front, rear, left, right}
+
+        Requirements:
+            - At least one side must have both pickup & return images.
+            - At most four sides can be provided (front, rear, left, right).
+        """
+        # groups[side] = {"pickup": file, "return": file}
         groups: Dict[str, Dict[str, Any]] = {}
 
-        # Collect upload files grouped by numeric id
+        # Collect upload files grouped by side name
         for key, value in form.items():
             # Only handle file uploads; skip non-file fields
             if not hasattr(value, "filename") or value.filename == "":
@@ -36,30 +48,65 @@ class UploadService:
             if not match:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Invalid form field name: '{key}'. Expected pattern '<N>-pickup' or '<N>-return'",
+                    detail=(
+                        f"Invalid form field name: '{key}'. "
+                        "Expected pattern '<side>-pickup' or '<side>-return' "
+                        "where side is one of: front, rear, left, right."
+                    ),
                 )
 
-            group_id = match.group("id")
             side = match.group("side")
+            phase = match.group("phase")  # "pickup" | "return"
 
-            groups.setdefault(group_id, {})[side] = value
+            groups.setdefault(side, {})[phase] = value
 
-        # Ensure each group has both pickup and return
-        incomplete = [gid for gid, pair in groups.items() if not ("pickup" in pair and "return" in pair)]
-        if incomplete:
+        if not groups:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"The following groups are incomplete (both pickup & return required): {incomplete}",
+                detail="No images found in request. "
+                       "Provide at least one complete side with 'pickup' and 'return' images.",
+            )
+
+        # Ensure each side that appears has both pickup and return
+        incomplete_sides = [
+            side for side, phases in groups.items()
+            if not ("pickup" in phases and "return" in phases)
+        ]
+        if incomplete_sides:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "The following sides are incomplete (both pickup & return required): "
+                    f"{incomplete_sides}"
+                ),
+            )
+
+        # At least one complete side must be present
+        if len(groups) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "At least one complete side is required. "
+                    "Each complete side must include both '<side>-pickup' and '<side>-return'."
+                ),
+            )
+
+        # At most four sides: front, rear, left, right
+        if len(groups) > 4:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Too many sides provided. A maximum of 4 sides is allowed: front, rear, left, right.",
             )
 
         upload_id = str(uuid.uuid4())
         uploaded_files_info: list[UploadedFileInfo] = []
 
-        for gid, pair in groups.items():
+        # For each side, upload pickup then return image
+        for side, phases in groups.items():
             side_upload: dict[str, UploadedFileInfo] = {}
 
-            for side_name in ("pickup", "return"):
-                upload_file = pair[side_name]
+            for phase in ("pickup", "return"):
+                upload_file = phases[phase]
 
                 # Determine file extension
                 _, ext = os.path.splitext(upload_file.filename)
@@ -69,7 +116,8 @@ class UploadService:
                         guessed = mimetypes.guess_extension(ct.split(";")[0].strip())
                         ext = guessed or ""
 
-                object_key = f"{upload_id}/{gid}-{side_name}{ext}"
+                # Object key format: "<upload_id>/<side>-<phase>.<ext>"
+                object_key = f"{upload_id}/{side}-{phase}{ext}"
 
                 await run_in_threadpool(
                     self._s3.upload_file_object,
@@ -79,7 +127,7 @@ class UploadService:
                 )
 
                 url = f"{self._settings.AWS_S3_ENDPOINT}/{self._settings.AWS_S3_BUCKET}/{object_key}"
-                side_upload[side_name] = UploadedFileInfo(key=object_key, url=url)
+                side_upload[phase] = UploadedFileInfo(key=object_key, url=url)
 
             uploaded_files_info.append(side_upload["pickup"])
             uploaded_files_info.append(side_upload["return"])

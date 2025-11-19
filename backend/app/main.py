@@ -1,17 +1,13 @@
-import re
 from io import BytesIO
 import cv2
 from fastapi import FastAPI, Request, HTTPException, status, Depends
 from fastapi.concurrency import run_in_threadpool
 
-from .ai_assessment import assess_car_on_return, draw_bounding_box
+from .ai_assessment.main import assess_car_on_return, draw_bounding_box
 from .config import Settings
 from .s3_client import S3Client
 from .models import UploadResponse, UploadedFileInfo
 from .upload_service import UploadService
-
-# validate form keys like `1-pickup` or `1-return`
-KEY_REGEX = re.compile(r"^(?P<id>\d+)-(?P<side>pickup|return)$")
 
 app = FastAPI(title="Car Damage Assessment API")
 

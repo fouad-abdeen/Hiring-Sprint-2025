@@ -1,5 +1,16 @@
-from typing import Any
-from app.models import DamagePrediction
+from typing import Any, TypedDict, Optional
+
+
+class DamagePrediction(TypedDict, total=False):
+    x: float
+    y: float
+    width: float
+    height: float
+    confidence: float
+    class_id: int
+    class_name: str
+    detection_id: str
+    severity: Optional[str]
 
 
 def _bbox_iou(a: DamagePrediction, b: DamagePrediction) -> float:

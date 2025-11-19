@@ -5,9 +5,9 @@ import supervision as sv
 import cv2
 import numpy as np
 
-from .config import Settings
-from .core_helpers import _normalize_predictions, DamagePrediction, _bbox_iou
-from .models import UploadedFileInfo
+from ..config import Settings
+from ..models import UploadedFileInfo
+from .helpers import DamagePrediction, _normalize_predictions, _bbox_iou
 
 settings = Settings() # loads from environment
 roboflow_client = InferenceHTTPClient(settings.ROBOFLOW_API_URL, settings.ROBOFLOW_API_KEY)
@@ -28,9 +28,10 @@ def assess_car_on_return(uploaded_images: list[UploadedFileInfo]):
 
         result_on_pickup = detect_car_damage(pickup_image.url)
         result_on_return = detect_car_damage(return_image.url)
+        image_side = pickup_image.key.split("_")[0].split("/")[0]
 
         damage_comparison = compare_damage(result_on_pickup, result_on_return)
-        final_result = {"predictions": damage_comparison.get("new_damages", [])}
+        final_result = {"predictions": damage_comparison.get("new_damages", []), "image_side": image_side}
         assessment_results.append((final_result, return_image))
 
     return assessment_results
