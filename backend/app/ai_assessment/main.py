@@ -16,8 +16,8 @@ car_damage_model_1 = "car-damage-detection-5ioys/1"
 car_damage_model_2 = "car-damage-c1f0i/1"
 damage_severity_model = "car-damage-severity-detection-cardd/1"
 
-def assess_car_on_return(uploaded_images: list[UploadedFileInfo]):
-    assessment_results: list[tuple[dict, UploadedFileInfo]] = []
+def assess_car_condition(uploaded_images: list[UploadedFileInfo]):
+    assessment_results: dict[str, dict[str, Any]] = {}
 
     if len(uploaded_images) % 2 != 0:
         raise ValueError("Uploaded images must be in pairs (pickup, return)")
@@ -28,15 +28,20 @@ def assess_car_on_return(uploaded_images: list[UploadedFileInfo]):
 
         result_on_pickup = detect_car_damage(pickup_image.url)
         result_on_return = detect_car_damage(return_image.url)
-        image_side = pickup_image.key.split("_")[0].split("/")[0]
 
         damage_comparison = compare_damage(result_on_pickup, result_on_return)
-        final_result = {"predictions": damage_comparison.get("new_damages", []), "image_side": image_side}
-        assessment_results.append((final_result, return_image))
+        predictions = damage_comparison.get("new_damages", [])
+
+        image_side = pickup_image.key.split("/")[1].split("-")[0]
+        assessment_results[image_side] = {
+            "pickup_image": pickup_image.url,
+            "return_image": return_image.url,
+            "predictions": predictions,
+        }
 
     return assessment_results
 
-def detect_car_damage(image_url: str, iou_threshold: Optional[float] = 0.5) -> list[DamagePrediction]:
+def detect_car_damage(image_url: str, iou_threshold: Optional[float] = 0.3) -> list[DamagePrediction]:
     """
     Run multiple car-damage detection models and return the final result.
 
@@ -99,7 +104,7 @@ def detect_car_damage(image_url: str, iou_threshold: Optional[float] = 0.5) -> l
         if detection_id:
             for severity_prediction in severity_predictions:
                 iou = _bbox_iou(highest_confidence_prediction, severity_prediction)
-                if iou > 0.5:
+                if iou > iou_threshold:
                     seen_detection_ids.add(detection_id)
                     # To-Do: Prompt OpenAI to verify the severity classification.
                     # highest_confidence_prediction["severity"] = severity_prediction["class"]
@@ -200,9 +205,9 @@ def compare_damage(
         "resolved_damages": resolved_damages,
     }
 
-async def draw_bounding_box(
+def draw_bounding_box(
     image_url: str,
-    result: dict[str, list[DamagePrediction]],
+    predictions: list[DamagePrediction],
 ) -> np.ndarray:
     # Download image bytes from URL
     response = requests.get(image_url)
@@ -214,9 +219,6 @@ async def draw_bounding_box(
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"Failed to decode image from URL: {image_url}")
-
-    # Build supervision.Detections manually from our normalized predictions
-    predictions: list[DamagePrediction] = result.get("predictions", []) or []
 
     if not predictions:
         # Nothing to draw, just return the original image
@@ -251,12 +253,8 @@ async def draw_bounding_box(
     )
 
     labels = []
-    for p in predictions:
-        cls = p.get("class_name") or "damage"
-        cls = cls.replace("-", " ").title()
-        conf = float(p.get("confidence", 0.0)) * 100.0
-        conf = round(conf)
-        labels.append(f"{conf}% {cls}")
+    for pred in predictions:
+        labels.append(get_prediction_label(pred))
 
     bounding_box_annotator = sv.BoxAnnotator()
     annotated_frame = bounding_box_annotator.annotate(
@@ -272,3 +270,10 @@ async def draw_bounding_box(
     )
 
     return annotated_frame
+
+def get_prediction_label(prediction: DamagePrediction) -> str:
+    class_name = prediction.get("class_name") or "damage"
+    class_name = class_name.replace("-", " ").title()
+    confidence = float(prediction.get("confidence", 0.0)) * 100.0
+    confidence = round(confidence)
+    return f"{confidence}% {class_name}"
