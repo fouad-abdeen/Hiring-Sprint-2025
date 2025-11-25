@@ -9,3 +9,4 @@ supervision~=0.27.0
 numpy~=2.2.6
 inference_sdk~=0.61.0
 opencv-python~=4.10.0
+redis~=5.0.0

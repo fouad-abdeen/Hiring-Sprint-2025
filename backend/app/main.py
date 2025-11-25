@@ -1,15 +1,30 @@
-from io import BytesIO
-import cv2
-from fastapi import FastAPI, Request, HTTPException, status, Depends
-from fastapi.concurrency import run_in_threadpool
+from datetime import datetime, timezone, timedelta
 
-from .ai_assessment.main import assess_car_on_return, draw_bounding_box
+from fastapi import FastAPI, Request, HTTPException, status, Depends, BackgroundTasks
+from starlette.middleware.cors import CORSMiddleware
+
+from .assessment_repository import set_assessment, get_assessment
 from .config import Settings
 from .s3_client import S3Client
-from .models import UploadResponse, UploadedFileInfo
+from .models import AssessmentResponse, UploadResponse
+from .assessment_service import run_assessment
 from .upload_service import UploadService
 
 app = FastAPI(title="Car Damage Assessment API")
+
+origins = [
+    "http://localhost:5173",
+    "http://localhost:8000",
+    ### Production Domain ###
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 settings = Settings()  # loads from environment
 s3 = S3Client(settings.AWS_S3_BUCKET, settings.AWS_S3_REGION, settings.AWS_S3_ENDPOINT, settings.AWS_ACCESS_KEY_ID, settings.AWS_SECRET_ACCESS_KEY)
@@ -29,6 +44,7 @@ async def health():
 @app.post("/upload", response_model=UploadResponse)
 async def upload_images(
     request: Request,
+    background_tasks: BackgroundTasks,
     service: UploadService = Depends(get_upload_service),
 ):
     """Upload matched pickup/return images.
@@ -40,42 +56,54 @@ async def upload_images(
         UploadResponse containing the generated upload_id (UUID) and uploaded files' URLs.
     """
     form = await request.form()
-    response = await service.handle_upload_form(form)
+    upload_id = await service.handle_upload_form(form)
 
-    assessment = assess_car_on_return(response.files)
+    # Immediately mark as pending and schedule background assessment.
+    assessment = AssessmentResponse(
+        status="pending",
+        created_at = datetime.now(timezone.utc).isoformat()
+    )
+    set_assessment(upload_id, assessment)
+    background_tasks.add_task(run_assessment, upload_id, service)
 
-    for result, image in assessment:
-        annotated_image = await draw_bounding_box(image.url, result)
+    return {"upload_id": upload_id}
 
-        # Encode annotated image (NumPy array) as JPEG and wrap in BytesIO
-        success, buffer = cv2.imencode(".jpg", annotated_image)
-        if not success:
-            raise RuntimeError("Failed to encode annotated image as JPEG")
+@app.get("/assessment/{upload_id}", response_model=AssessmentResponse)
+async def get_assessment_info(
+        upload_id: str,
+        background_tasks: BackgroundTasks,
+        service: UploadService = Depends(get_upload_service),
+):
+    """
+    Return assessment info for a given upload_id
+    """
+    assessment = get_assessment(upload_id)
 
-        bytes_io = BytesIO(buffer.tobytes())
-        bytes_io.seek(0)
-
-        uploaded_file = await service.upload_file_object(
-            bytes_io,
-            f"{image.key.split('.')[0]}-annotated.jpg",
-            content_type="image/jpeg",
+    if not assessment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assessment not found for this upload_id",
         )
-        response.files.append(uploaded_file)
 
-    return response
+    created_at = datetime.fromisoformat(assessment.created_at)
+    current_time = datetime.now(timezone.utc)
 
+    if assessment.status == "pending":
+        cutoff_time = current_time - timedelta(minutes=10)
+        if created_at < cutoff_time:
+            # Reattempt to execute the assessment if it's still pending for more than 10 minutes.
+            # `run_assessment` handles updating the status to "in_progress".
+            background_tasks.add_task(run_assessment, upload_id, service)
 
-@app.get("/images/{upload_id}")
-async def list_images(upload_id: str):
-    """List images uploaded under the given upload_id and return their URLs."""
-    prefix = f"{upload_id}/"
+    if assessment.status == "in_progress":
+        cutoff_time = current_time - timedelta(minutes=30)
+        if created_at < cutoff_time:
+            # Cancel the assessment if it's been running for too long (more than 30 minutes).
+            assessment = AssessmentResponse(
+                status="failed",
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                error="Assessment timed out")
+            set_assessment(upload_id, assessment)
 
-    # list_keys is blocking; run in the threadpool
-    keys = await run_in_threadpool(s3.list_keys, prefix)
-    if not keys or len(keys) == 1:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No images found for this upload_id")
+    return assessment
 
-    files = [
-        UploadedFileInfo(key=k, url=f"{settings.AWS_S3_ENDPOINT}/{settings.AWS_S3_BUCKET}/{k}") for k in keys
-    ]
-    return {"upload_id": upload_id, "files": files[1::]}
