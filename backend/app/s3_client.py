@@ -13,12 +13,32 @@ class S3Client:
             aws_secret_access_key=secret_access_key
         )
         self.bucket = bucket
+        self.configure_lifecycle_policy()
+
+    def configure_lifecycle_policy(self):
+        """Configure S3 lifecycle policy to auto-delete objects after 3 days"""
+        lifecycle_policy = {
+            'Rules': [
+                {
+                    'ID': 'DeleteAfter3Days',
+                    'Status': 'Enabled',
+                    'Filter': {'Prefix': ''},  # Apply to all objects
+                    'Expiration': {
+                        'Days': 3
+                    }
+                }
+            ]
+        }
+
+        self._client.put_bucket_lifecycle_configuration(
+            Bucket=self.bucket,
+            LifecycleConfiguration=lifecycle_policy
+        )
 
     def upload_file_object(self, file_object, key: str, content_type: Optional[str] = None) -> None:
         extra_args = { "ContentType": content_type } if content_type else {}
         # boto3 is synchronous; callers should run this in a threadpool if used from async code
         self._client.upload_fileobj(Fileobj=file_object, Bucket=self.bucket, Key=key, ExtraArgs=extra_args)
-
 
     def list_keys(self, prefix: str) -> List[str]:
         paginator = self._client.get_paginator("list_objects_v2")
@@ -27,4 +47,3 @@ class S3Client:
             for obj in page.get("Contents", []):
                 keys.append(obj["Key"])
         return keys
-
