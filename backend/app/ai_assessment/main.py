@@ -5,9 +5,10 @@ import supervision as sv
 import cv2
 import numpy as np
 
+from .models import DamagePrediction
 from ..config import Settings
-from ..models import UploadedFileInfo
-from .helpers import DamagePrediction, _normalize_predictions, _bbox_iou
+from .helpers import _normalize_predictions, _bbox_iou
+from ..upload_service import UploadService
 
 settings = Settings() # loads from environment
 roboflow_client = InferenceHTTPClient(settings.ROBOFLOW_API_URL, settings.ROBOFLOW_API_KEY)
@@ -16,11 +17,14 @@ car_damage_model_1 = "car-damage-detection-5ioys/1"
 car_damage_model_2 = "car-damage-c1f0i/1"
 damage_severity_model = "car-damage-severity-detection-cardd/1"
 
-def assess_car_condition(uploaded_images: list[UploadedFileInfo]):
+def assess_car_condition(upload_id: str, service: UploadService):
+    uploaded_images = service.get_uploaded_files(upload_id)
     assessment_results: dict[str, dict[str, Any]] = {}
 
     if len(uploaded_images) % 2 != 0:
         raise ValueError("Uploaded images must be in pairs (pickup, return)")
+
+    uploaded_images.sort(key=lambda x: x.key)
 
     for i in range(0, len(uploaded_images), 2):
         pickup_image = uploaded_images[i]
