@@ -12,15 +12,18 @@ class UploadResponse(BaseModel):
 
 
 class AssessmentResponse(BaseModel):
-    status: str = Field(..., description="Status of the assessment")
-    created_at: Optional[str] = Field(default=None, description="Timestamp of the assessment creation")
-    started_at: Optional[str] = Field(default=None, description="Timestamp of the assessment start")
-    updated_at: Optional[str] = Field(default=None, description="Timestamp of the last assessment update")
-    completed_at: Optional[str] = Field(default=None, description="Timestamp of the assessment completion")
-    results: Optional[dict[str, dict[str, Any]]] = Field(default=None, description="Assessment results")
-    summary: Optional[str] = Field(default=None, description="Assessment summary")
-    error: Optional[str] = Field(default=None, description="Error message if any")
+    status: str = Field(..., description="Current assessment status: 'pending', 'in_progress', 'completed', or 'failed'")
+    created_at: Optional[str] = Field(default=None, description="ISO 8601 timestamp when the assessment was created")
+    started_at: Optional[str] = Field(default=None, description="ISO 8601 timestamp when the assessment was started")
+    updated_at: Optional[str] = Field(default=None, description="ISO 8601 timestamp when the assessment was updated")
+    completed_at: Optional[str] = Field(default=None, description="ISO 8601 timestamp when the assessment was completed")
+    results: Optional[dict[str, dict[str, Any]]] = Field(
+        default=None,
+        description="Detailed damage assessment results per vehicle side (left, right, front, rear)." +
+                    "Each side contains type and severity for each detected damage (if any)."
+                    "Each side contains type and severity for each detected damage (if any)."
+    )
+    summary: Optional[str] = Field(default=None, description="Human-readable summary of the assessment findings")
+    error: Optional[str] = Field(default=None, description="Error message if the assessment failed or timed out")
 
-    # class Config:
-    #     # Allow creating instances from dictionaries with extra fields ignored
-    #     extra = "ignore"
+
