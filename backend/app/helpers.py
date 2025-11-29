@@ -18,7 +18,7 @@ def parse_and_validate_form(form: FormData) -> dict[str, dict[str, Any]]:
         if not hasattr(value, "filename") or value.filename == "":
             continue
 
-        match = KEY_REGEX.match(key)
+        match = KEY_REGEX.match(key.replace("_", "-").lower())
         if not match:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
