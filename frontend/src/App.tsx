@@ -65,6 +65,12 @@ function App() {
       const file = fileList?.[0];
       if (!file) return;
 
+      const maxSize = 3 * 1024 * 1024; // 3MB in bytes
+      if (file.size > maxSize) {
+        alert('File size must be less than 3MB');
+        return;
+      }
+
       setFiles((prev) => ({
         ...prev,
         [side]: {
