@@ -1,7 +1,6 @@
-from typing import TypedDict, Optional
-
-from fastapi import UploadFile
+from typing import Any, Optional
 from pydantic import BaseModel, Field
+
 
 class UploadedFileInfo(BaseModel):
     key: str = Field(..., description="S3 key of the uploaded file")
@@ -10,15 +9,18 @@ class UploadedFileInfo(BaseModel):
 
 class UploadResponse(BaseModel):
     upload_id: str = Field(..., description="UUID for this upload set")
-    files: list[UploadedFileInfo] = Field(..., description="List of uploaded files with their URLs")
 
-class DamagePrediction(TypedDict, total=False):
-    x: float
-    y: float
-    width: float
-    height: float
-    confidence: float
-    class_id: int
-    class_name: str
-    detection_id: str
-    severity: Optional[str]
+
+class AssessmentResponse(BaseModel):
+    status: str = Field(..., description="Status of the assessment")
+    created_at: Optional[str] = Field(default=None, description="Timestamp of the assessment creation")
+    started_at: Optional[str] = Field(default=None, description="Timestamp of the assessment start")
+    updated_at: Optional[str] = Field(default=None, description="Timestamp of the last assessment update")
+    completed_at: Optional[str] = Field(default=None, description="Timestamp of the assessment completion")
+    results: Optional[dict[str, dict[str, Any]]] = Field(default=None, description="Assessment results")
+    summary: Optional[str] = Field(default=None, description="Assessment summary")
+    error: Optional[str] = Field(default=None, description="Error message if any")
+
+    # class Config:
+    #     # Allow creating instances from dictionaries with extra fields ignored
+    #     extra = "ignore"

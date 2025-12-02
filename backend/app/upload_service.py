@@ -1,20 +1,14 @@
 import os
-import re
 import uuid
 import mimetypes
-from typing import Dict, Any, Tuple
 
-from fastapi import HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
 
 from .config import Settings
-from .models import UploadResponse, UploadedFileInfo
+from .helpers import parse_and_validate_form
+from .models import UploadedFileInfo
 from .s3_client import S3Client
-
-
-# validate form keys like `1-pickup` or `1-return`
-KEY_REGEX = re.compile(r"^(?P<id>\d+)-(?P<side>pickup|return)$")
 
 
 class UploadService:
@@ -22,69 +16,46 @@ class UploadService:
         self._s3 = s3_client
         self._settings = settings
 
-    async def handle_upload_form(self, form: FormData) -> UploadResponse:
-        """Process the multipart form, upload files to S3, and return metadata."""
-        groups: Dict[str, Dict[str, Any]] = {}
+    async def handle_upload_form(self, form: FormData) -> str:
+        """Process the multipart form, upload files to S3, and return metadata.
 
-        # Collect upload files grouped by numeric id
-        for key, value in form.items():
-            # Only handle file uploads; skip non-file fields
-            if not hasattr(value, "filename") or value.filename == "":
-                continue
+        Expected form field names:
+            `<side>-pickup` and `<side>-return`
 
-            match = KEY_REGEX.match(key)
-            if not match:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"Invalid form field name: '{key}'. Expected pattern '<N>-pickup' or '<N>-return'",
-                )
+        Where:
+            side ∈ {front, rear, left, right}
 
-            group_id = match.group("id")
-            side = match.group("side")
-
-            groups.setdefault(group_id, {})[side] = value
-
-        # Ensure each group has both pickup and return
-        incomplete = [gid for gid, pair in groups.items() if not ("pickup" in pair and "return" in pair)]
-        if incomplete:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"The following groups are incomplete (both pickup & return required): {incomplete}",
-            )
+        Requirements:
+            - At least one side must have both pickup and return images.
+            - At most four sides can be provided (front, rear, left, right).
+        """
+        groups = parse_and_validate_form(form)
 
         upload_id = str(uuid.uuid4())
-        uploaded_files_info: list[UploadedFileInfo] = []
 
-        for gid, pair in groups.items():
-            side_upload: dict[str, UploadedFileInfo] = {}
+        async def _upload_single_phase(side: str, phase: str) -> None:
+            """Upload a single pickup/return file for one side."""
+            upload_file = groups[side][phase]
 
-            for side_name in ("pickup", "return"):
-                upload_file = pair[side_name]
+            ext = self._determine_file_extension(
+                filename=upload_file.filename,
+                content_type=getattr(upload_file, "content_type", None),
+            )
 
-                # Determine file extension
-                _, ext = os.path.splitext(upload_file.filename)
-                if not ext:
-                    ct = getattr(upload_file, "content_type", None)
-                    if ct:
-                        guessed = mimetypes.guess_extension(ct.split(";")[0].strip())
-                        ext = guessed or ""
+            # Object key format: "<upload_id>/<side>-<phase>.<ext>"
+            object_key = f"{upload_id}/{side}-{phase}{ext}"
 
-                object_key = f"{upload_id}/{gid}-{side_name}{ext}"
+            await self.upload_file_object(
+                upload_file.file,
+                object_key,
+                getattr(upload_file, "content_type", None),
+            )
 
-                await run_in_threadpool(
-                    self._s3.upload_file_object,
-                    upload_file.file,
-                    object_key,
-                    getattr(upload_file, "content_type", None),
-                )
+        for car_side in groups.keys():
+            await _upload_single_phase(car_side, "pickup")
+            await _upload_single_phase(car_side, "return")
 
-                url = f"{self._settings.AWS_S3_ENDPOINT}/{self._settings.AWS_S3_BUCKET}/{object_key}"
-                side_upload[side_name] = UploadedFileInfo(key=object_key, url=url)
-
-            uploaded_files_info.append(side_upload["pickup"])
-            uploaded_files_info.append(side_upload["return"])
-
-        return UploadResponse(upload_id=upload_id, files=uploaded_files_info)
+        return upload_id
 
     async def upload_file_object(self, file_object, key: str, content_type: str | None = None) -> UploadedFileInfo:
         """Upload a file object to S3 asynchronously."""
@@ -94,4 +65,35 @@ class UploadService:
             key,
             content_type,
         )
-        return UploadedFileInfo(key=key, url=f"{self._settings.AWS_S3_ENDPOINT}/{self._settings.AWS_S3_BUCKET}/{key}")
+        return UploadedFileInfo(key=key, url=self._get_file_url(key))
+
+    def get_uploaded_files(self, upload_id: str) -> list[UploadedFileInfo]:
+        uploaded_files = []
+        keys_list = self._s3.list_keys(upload_id)
+
+        for key in keys_list:
+            if key == f"{upload_id}/":
+                continue
+            uploaded_files.append(UploadedFileInfo(key=key, url=self._get_file_url(key)))
+
+        return uploaded_files
+
+    def _get_file_url(self, key: str) -> str:
+        return f"{self._settings.AWS_S3_ENDPOINT}/{self._settings.AWS_S3_BUCKET}/{key}"
+
+    @staticmethod
+    def _determine_file_extension(
+        filename: str,
+        content_type: str | None,
+    ) -> str:
+        """Determine file extension from the filename or content type."""
+        _, ext = os.path.splitext(filename or "")
+        if ext:
+            return ext
+
+        if content_type:
+            guessed = mimetypes.guess_extension(content_type.split(";")[0].strip())
+            if guessed:
+                return guessed
+
+        return ""
