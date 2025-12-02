@@ -1,7 +1,9 @@
 import os
 import uuid
 import mimetypes
+from io import BytesIO
 
+from PIL import Image
 from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import FormData
 
@@ -12,6 +14,12 @@ from .s3_client import S3Client
 
 
 class UploadService:
+    # Allowed file extensions
+    ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
+
+    # Maximum file size in bytes (3 MB)
+    MAX_FILE_SIZE = 3 * 1024 * 1024  # 3 MB
+
     def __init__(self, s3_client: S3Client, settings: Settings) -> None:
         self._s3 = s3_client
         self._settings = settings
@@ -36,6 +44,9 @@ class UploadService:
         async def _upload_single_phase(side: str, phase: str) -> None:
             """Upload a single pickup/return file for one side."""
             upload_file = groups[side][phase]
+
+            # Validate that the file is actually an image
+            await self._validate_image_file(upload_file.file, upload_file.filename)
 
             ext = self._determine_file_extension(
                 filename=upload_file.filename,
@@ -80,6 +91,51 @@ class UploadService:
 
     def _get_file_url(self, key: str) -> str:
         return f"{self._settings.AWS_S3_ENDPOINT}/{self._settings.AWS_S3_BUCKET}/{key}"
+
+    async def _validate_image_file(self, file_object, filename: str) -> None:
+        """Validate that the uploaded file is actually an image.
+
+        Performs multiple security checks:
+        1. Extension validation
+        2. Image library validation (attempts to open with Pillow)
+        3. Basic image property verification
+
+        Args:
+            file_object: The file object to validate
+            filename: The original filename
+
+        Raises:
+            ValueError: If the file is not a valid image
+        """
+        try:
+            # Check file extension
+            _, ext = os.path.splitext(filename or "")
+            if ext.lower() not in self.ALLOWED_EXTENSIONS:
+                raise ValueError(f"File extension '{ext}' is not allowed. Only image files are permitted.")
+
+            # Read file content
+            file_content = await run_in_threadpool(file_object.read)
+
+            file_size = len(file_content)
+            if file_size > self.MAX_FILE_SIZE:
+                raise ValueError(
+                    f"File size ({file_size / (1024 * 1024):.2f} MB) exceeds the maximum allowed size of 3 MB.")
+
+            # Reset file pointer for later use
+            await run_in_threadpool(file_object.seek, 0)
+
+            # Validate with Pillow
+            img = Image.open(BytesIO(file_content))
+            img.verify()  # Verify it's a valid image
+
+            # Re-open for additional checks (verify() closes the image)
+            img = Image.open(BytesIO(file_content))
+
+            if img.format not in ['JPEG', 'PNG', 'GIF', 'WEBP', 'BMP', 'TIFF']:
+                raise ValueError(f"Unsupported image format: {img.format}")
+
+        except Exception as e:
+            raise ValueError(f"Invalid image file: {str(e)}")
 
     @staticmethod
     def _determine_file_extension(
